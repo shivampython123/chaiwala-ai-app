@@ -6,58 +6,51 @@ import io
 from twilio.rest import Client
 import os
 import datetime
+import re
 
 # ────────────────────────────────────────────────
-#   SECURE CREDENTIAL LOADING
-#   Uses Streamlit secrets (cloud/local) with env fallback
-#   → NEVER hardcode real keys here!
+#   SECURE CREDENTIALS
 # ────────────────────────────────────────────────
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
-TWILIO_ACCOUNT_SID = st.secrets.get("TWILIO_ACCOUNT_SID", os.getenv("TWILIO_ACCOUNT_SID", ""))
-TWILIO_AUTH_TOKEN = st.secrets.get("TWILIO_AUTH_TOKEN", os.getenv("TWILIO_AUTH_TOKEN", ""))
-TWILIO_FROM_WHATSAPP = "whatsapp:+14155238886"
+GROQ_API_KEY    = st.secrets.get("GROQ_API_KEY",    os.getenv("GROQ_API_KEY", ""))
+TWILIO_SID      = st.secrets.get("TWILIO_ACCOUNT_SID", os.getenv("TWILIO_ACCOUNT_SID", ""))
+TWILIO_TOKEN    = st.secrets.get("TWILIO_AUTH_TOKEN",  os.getenv("TWILIO_AUTH_TOKEN", ""))
+TWILIO_FROM     = "whatsapp:+14155238886"
+OWNER_PHONE     = st.secrets.get("OWNER_PHONE",     os.getenv("OWNER_PHONE", "+917987748574"))
 
-OWNER_PHONE = st.secrets.get("OWNER_PHONE", os.getenv("OWNER_PHONE", "+917987748574"))
-
-# Quick check – show warning in UI if keys are missing (helps debugging)
 if not GROQ_API_KEY:
-    st.warning("⚠️ GROQ_API_KEY is missing – check .streamlit/secrets.toml (local) or app secrets (cloud)")
-if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-    st.warning("⚠️ Twilio credentials missing – WhatsApp notifications won't work")
+    st.error("GROQ_API_KEY missing → AI features disabled")
+if not TWILIO_SID or not TWILIO_TOKEN:
+    st.warning("Twilio credentials missing → WhatsApp notifications disabled")
+
+groq_client   = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN) if TWILIO_SID and TWILIO_TOKEN else None
 
 # ────────────────────────────────────────────────
-#   Clients (only initialize if keys present)
+#   HELPERS
 # ────────────────────────────────────────────────
-groq_client = None
-twilio_client = None
+def normalize_phone(raw: str) -> str | None:
+    digits = re.sub(r'\D', '', str(raw or ""))
+    if len(digits) == 10:
+        return "+91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if digits.startswith("91") and 10 <= len(digits) <= 12:
+        return "+91" + digits[-10:]
+    if raw and raw.startswith("+") and len(digits) >= 10:
+        return "+" + digits
+    return None
 
-if GROQ_API_KEY:
-    try:
-        groq_client = Groq(api_key=GROQ_API_KEY)
-    except Exception as e:
-        st.error(f"Groq client init failed: {e}")
-
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
-    try:
-        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    except Exception as e:
-        st.error(f"Twilio client init failed: {e}")
-
-# ────────────────────────────────────────────────
-#   Send WhatsApp message
-# ────────────────────────────────────────────────
-def send_whatsapp(to_phone, message_body):
+def send_whatsapp(to_phone: str, body: str) -> tuple[bool, str]:
     if not twilio_client:
-        return False, "Twilio client not initialized (missing credentials)"
-    if not to_phone.strip():
-        return False, "No phone number provided"
-    if not to_phone.startswith("+"):
-        to_phone = "+91" + to_phone.lstrip("0")
-    to_whatsapp = f"whatsapp:{to_phone}"
+        return False, "Twilio not configured"
+    to_norm = normalize_phone(to_phone)
+    if not to_norm:
+        return False, "Invalid phone number"
+    to_whatsapp = f"whatsapp:{to_norm}"
     try:
         msg = twilio_client.messages.create(
-            body=message_body,
-            from_=TWILIO_FROM_WHATSAPP,
+            body=body,
+            from_=TWILIO_FROM,
             to=to_whatsapp
         )
         return True, f"Sent (SID: {msg.sid})"
@@ -65,196 +58,336 @@ def send_whatsapp(to_phone, message_body):
         return False, str(e)
 
 # ────────────────────────────────────────────────
-#   Page setup
+#   PAGE CONFIG + STYLING
 # ────────────────────────────────────────────────
-st.set_page_config(page_title="ChaiWala AI", page_icon="🫖", layout="wide")
+st.set_page_config(
+    page_title="ChaiWala • Fresh Chai Delivered",
+    page_icon="🫖",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-st.title("🫖 ChaiWala AI • Order Your Chai")
-
-with st.expander("WhatsApp Updates – Important"):
-    st.markdown("""
-    **To get order confirmations & updates on WhatsApp:**
-    1. Open WhatsApp
-    2. Send `join dozen-huge` to **+14155238886**
-    3. Wait for confirmation reply
-    4. Enter your number in the form below
-    """)
-
-# ────────────────────────────────────────────────
-#   ORDER FORM
-# ────────────────────────────────────────────────
-with st.form("chai_order"):
-
-    col1, col2 = st.columns([5, 4])
-
-    with col1:
-        name = st.text_input("Your name", placeholder="Enter your name")
-        customer_phone = st.text_input(
-            "WhatsApp Number",
-            placeholder="Please enter your mobile number like 7987748574 or +917987748574",
-            help="Must have joined the Twilio sandbox first"
-        )
-        cups   = st.number_input("Number of cups", min_value=1, max_value=20, value=1)
-        sugar  = st.slider("Sugar (tsp per cup)", 0, 5, 2)
-        masala = st.checkbox("Add Masala", value=True)
-
-        tea_type = st.radio("Tea Type", ["Milk Tea", "Masala Tea", "Green Tea", "Black Tea"])
-        flavour  = st.multiselect("Extra Flavour", ["Ginger", "Cardamom", "Tulsi", "None"], default=["Ginger"])
-        milk     = st.selectbox("Milk Type", ["Full Fat", "Low Fat", "Almond", "None"])
-
-    with col2:
-        if st.form_submit_button("Get AI Description", type="secondary"):
-            if name.strip() and groq_client:
-                with st.spinner("ChaiWala AI is brewing your description..."):
-                    try:
-                        prompt = f"Greet {name} warmly. Describe this chai order in fun, desi style. Add 1 short useful tip. Order details: {cups} cups of {tea_type}, flavours: {', '.join(flavour)}, masala: {'yes' if masala else 'no'}, sugar {sugar} tsp/cup, milk: {milk}"
-                        response = groq_client.chat.completions.create(
-                            model="llama-3.3-70b-versatile",
-                            messages=[{"role": "user", "content": prompt}],
-                            temperature=0.8,
-                            max_tokens=180
-                        )
-                        st.markdown(f"**ChaiWala says:**\n{response.choices[0].message.content.strip()}")
-                    except Exception as ex:
-                        st.error(f"AI description failed: {ex}")
-            elif not groq_client:
-                st.error("Groq AI not available – check your API key in secrets")
-
-        # Simple pricing logic
-        base_price = 15 if "Milk" in tea_type or "Masala" in tea_type else 12
-        addons = len([f for f in flavour if f != "None"]) * 4 + sugar * 2
-        total = round((base_price + addons) * cups * 1.18, 1)
-        st.markdown(f"**Estimated total: ₹ {total:.1f}** (approx)")
-
-    submitted = st.form_submit_button("PLACE ORDER 🛒", type="primary", use_container_width=True)
-
-if submitted:
-    if not name.strip() or not customer_phone.strip():
-        st.error("Name and WhatsApp number are required")
-    elif not twilio_client:
-        st.error("Cannot send WhatsApp – Twilio credentials missing")
-    else:
-        # Build summary
-        summary_lines = [
-            f"**New Chai Order**",
-            f"Customer: {name}",
-            f"WhatsApp: {customer_phone}",
-            f"Cups: {cups}",
-            f"Tea: {tea_type}",
-            f"Flavours: {', '.join(flavour)}",
-            f"Masala: {'Yes' if masala else 'No'}",
-            f"Sugar: {sugar} tsp per cup",
-            f"Milk: {milk}",
-            f"Estimated: ₹{total:.1f}"
-        ]
-        summary_text = "\n".join(summary_lines)
-
-        st.success(f"Thank you **{name}**! Your order is placed 🫖✨ We'll notify via WhatsApp.")
-        st.balloons()
-
-        # Owner notification
-        owner_msg = f"""🆕 NEW CHAI ORDER!
-
-{summary_text}
-
-Please prepare soon. Cash/UPI on delivery for now."""
-        ok_owner, msg_owner = send_whatsapp(OWNER_PHONE, owner_msg)
-        if ok_owner:
-            st.toast("Notified owner via WhatsApp", icon="✅")
-        else:
-            st.warning(f"Owner notification failed: {msg_owner}")
-
-        # Customer confirmation
-        cust_msg = f"""Hi *{name}*! 🫖✨
-
-Your chai is confirmed!
-
-{summary_text}
-
-We'll get it ready soon. See you! ☕❤️
-ChaiWala AI"""
-        ok_cust, msg_cust = send_whatsapp(customer_phone, cust_msg)
-        if ok_cust:
-            st.success("Confirmation sent to your WhatsApp")
-        else:
-            st.error(f"Confirmation failed: {msg_cust}")
-
-        # QR code
-        qr_data = f"Order: {name} • {cups}× {tea_type} • ₹{total:.1f} • {datetime.datetime.now().strftime('%d-%b %H:%M')}"
-        qr = qrcode.QRCode(version=1, box_size=6, border=4)
-        qr.add_data(qr_data)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="#8B4513", back_color="white")
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        st.image(buf, caption="Order Summary QR (share if needed)", width=180)
+st.markdown("""
+    <style>
+    .main .block-container {padding-top: 1.2rem; padding-bottom: 2rem; background-color: #ffffff;}
+    .stButton > button {border-radius: 10px; font-weight: 600; transition: all 0.25s;}
+    
+    button[kind="primary"], .stButton > button[kind="primary"] {
+        background-color: #E84C2E !important;
+        color: white !important;
+        border: none;
+    }
+    button[kind="primary"]:hover, .stButton > button[kind="primary"]:hover {
+        background-color: #D63E20 !important;
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(214, 62, 32, 0.3);
+    }
+    
+    [data-testid="stColumn"]:nth-child(2) {
+        background: #FFF8F2;
+        border-left: 1px solid #EDEDED;
+        padding: 1.2rem 1.4rem;
+        border-radius: 10px;
+        min-height: 82vh;
+    }
+    
+    .stAlert.info {
+        background-color: #FFE0CC !important;
+        border: 1px solid #FF8533 !important;
+        border-radius: 12px !important;
+        padding: 1.3rem !important;
+        box-shadow: 0 3px 10px rgba(255, 133, 51, 0.18) !important;
+        color: #111111 !important;
+    }
+    
+    div.stMarkdown > div > p,
+    div.stMarkdown > div > h4,
+    div.stMarkdown blockquote {
+        background-color: #FFF0E0 !important;
+        padding: 1.3rem 1.4rem !important;
+        border-radius: 10px !important;
+        border-left: 5px solid #FF6B35 !important;
+        margin: 1.2rem 0 !important;
+        box-shadow: 0 2px 8px rgba(255, 107, 53, 0.12) !important;
+        color: #111111 !important;
+    }
+    
+    .success-box {
+        background-color: #FFF0E0;
+        padding: 1.5rem;
+        border-radius: 12px;
+        border-left: 6px solid #FF6B35;
+        margin: 1.5rem 0;
+        box-shadow: 0 4px 12px rgba(255, 107, 53, 0.15);
+        color: #111111;
+    }
+    
+    .chat-header {
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: #E84C2E;
+        margin-bottom: 1.1rem;
+    }
+    
+    hr {border-color: #E0E0E0; margin: 1.5rem 0;}
+    </style>
+""", unsafe_allow_html=True)
 
 # ────────────────────────────────────────────────
-#   ALWAYS-ON CHATBOT
+#   LAYOUT
 # ────────────────────────────────────────────────
-st.markdown("---")
-st.subheader("🗣️ Talk to ChaiWala AI")
-st.caption("Ask anything: menu, prices, custom chai ideas, payment (currently cash/UPI on delivery), chai facts... I'm here 24/7!")
+main_col, chat_col = st.columns([7, 3])
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [
-        {"role": "system", "content": """You are ChaiWala AI – a warm, fun, Delhi-style chai expert.
-Use friendly desi language (mix Hindi-English naturally).
-Menu info:
-- Milk Tea / Masala Tea: ₹15 per cup
-- Green Tea / Black Tea: ₹12 per cup
-- Add-ons: Ginger/Cardamom/Tulsi ₹4 each, extra sugar ₹2/tsp/cup, masala option free
-- Milk: Full Fat, Low Fat, Almond, None
-- Cups: 1–20, sugar 0–5 tsp/cup
-Payment: Cash or UPI on delivery for now (online coming soon)
-Orders placed via the form above. Be helpful, keep replies short & tasty unless more detail asked.
-Add fun chai facts or jokes sometimes!"""}
-    ]
+with main_col:
+    st.markdown(
+        "<h1 style='color: #E84C2E; margin-bottom: 0.5rem;'>🫖 ChaiWala • Tapri-Style Chai, Delivered Fast!</h1>",
+        unsafe_allow_html=True
+    )
+    st.caption("Fresh • Custom masala • Cash / UPI on delivery • Delhi NCR")
 
-# Show chat history
-for message in st.session_state.chat_history:
-    if message["role"] != "system":
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    with st.expander("📱 WhatsApp Updates – Required for tracking", expanded=True):
+        st.markdown("""
+        1. Open WhatsApp  
+        2. Send **join dozen-huge** to **+14155238886**  
+        3. Wait for confirmation reply  
+        4. Enter the same number below  
+        """)
 
-# User message
-if user_msg := st.chat_input("Ask me anything about chai..."):
-    if not groq_client:
-        st.error("Chatbot not available – Groq API key missing")
-    else:
-        st.session_state.chat_history.append({"role": "user", "content": user_msg})
-        with st.chat_message("user"):
-            st.markdown(user_msg)
+    with st.form("chai_order_form"):
+        st.subheader("Build Your Chai ☕")
 
-        with st.chat_message("assistant"):
-            placeholder = st.empty()
-            full_response = ""
+        c1, c2 = st.columns([5, 4])
 
-            try:
-                stream = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=st.session_state.chat_history,
-                    temperature=0.75,
-                    max_tokens=400,
-                    stream=True
+        with c1:
+            name = st.text_input("Your Name", placeholder="Rahul Verma", max_chars=40).strip()
+            phone_raw = st.text_input("WhatsApp Number", placeholder="7987748574 or +917987748574")
+            cups = st.number_input("Cups", min_value=1, max_value=20, value=1, step=1)
+
+            tea_type = st.radio("Tea Type", ["Milk Tea", "Masala Tea", "Green Tea", "Black Tea"], horizontal=True)
+            masala = st.checkbox("Extra Masala (free)", value=True)
+            flavour = st.multiselect("Extra Tadka", ["Ginger", "Cardamom", "Tulsi", "None"], default=["None"])
+            sugar = st.slider("Sugar (tsp per cup)", 0, 5, 2)
+            milk = st.selectbox("Milk Type", ["Full Fat", "Low Fat", "Almond", "None"])
+
+            # Order Type
+            order_mode = st.radio(
+                "Order Type",
+                ["Delivery", "Dine-in / Pickup"],
+                horizontal=True,
+                index=0,
+                help="Dine-in / Pickup available only at select ChaiWala locations"
+            )
+
+            # Address field only appears for Delivery
+            delivery_address = ""
+            if order_mode == "Delivery":
+                st.markdown("### Delivery Details")
+                delivery_address = st.text_area(
+                    "Full Delivery Address *",
+                    placeholder="Flat no, Building name, Street, Landmark, Area, Delhi - Pincode",
+                    height=100,
+                    help="Please include flat number, landmark and pincode for fast delivery"
                 )
 
-                for chunk in stream:
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
-                        placeholder.markdown(full_response + "▌")
-                placeholder.markdown(full_response)
+        with c2:
+            st.markdown("#### Price Preview")
 
-            except Exception as e:
-                error_text = f"Oops! Thodi si dikkat ho gayi... ({str(e)})\nTry again?"
-                placeholder.markdown(error_text)
-                full_response = error_text
+            base_price   = 12 if tea_type in ["Green Tea", "Black Tea"] else 15
+            flavour_cost = len([f for f in flavour if f != "None"]) * 4
+            sugar_cost   = sugar * 2
+            subtotal     = (base_price + flavour_cost + sugar_cost) * cups
+            gst_amount   = subtotal * 0.18
+            total        = round(subtotal + gst_amount, 1)
 
-        st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+            st.info(f"""
+**Per cup**  
+Base → ₹{base_price}  
+Flavours → ₹{flavour_cost}  
+Sugar → ₹{sugar_cost}  
+Masala → Free  
 
-if st.button("Clear Chat History"):
-    st.session_state.chat_history = [st.session_state.chat_history[0]]
-    st.rerun()
+**Subtotal** → ₹{subtotal:.1f}  
+**GST 18%** → ₹{gst_amount:.1f}  
+**Total** → **₹{total:.1f}**
+            """)
 
-st.caption("Test version • WhatsApp via Twilio Sandbox • Payments: cash/UPI on delivery for now")
+            if st.form_submit_button("Get AI Description", use_container_width=True):
+                if name and phone_raw and groq_client:
+                    with st.spinner("Brewing your special message..."):
+                        addr_part = f"Address: {delivery_address.strip()}" if order_mode == "Delivery" and delivery_address.strip() else ""
+                        prompt = f"""
+Greet {name} like a true Delhi chai-wala bhaiya — warm, funny, full desi vibe.
+Describe this chai order excitedly in Hindi-English mix.
+Add one short useful chai tip or fun fact.
+Order: {cups} cups of {tea_type}, {'with masala' if masala else 'no masala'},
+flavours: {', '.join(flavour)}, {sugar} tsp sugar per cup, milk: {milk}
+Mode: {order_mode}
+{addr_part}
+Keep it short & tasty (~100-140 words).
+                        """
+                        try:
+                            resp = groq_client.chat.completions.create(
+                                model="llama-3.3-70b-versatile",
+                                messages=[{"role": "user", "content": prompt}],
+                                temperature=0.82,
+                                max_tokens=180
+                            )
+                            st.markdown("**ChaiWala AI says:**")
+                            st.markdown(resp.choices[0].message.content.strip())
+                        except Exception as e:
+                            st.error(f"AI error: {e}")
+
+        submitted = st.form_submit_button("PLACE ORDER 🛒", type="primary", use_container_width=True)
+
+    if submitted:
+        norm_phone = normalize_phone(phone_raw)
+        errors = []
+
+        if not name.strip():
+            errors.append("Name is required")
+        if not norm_phone:
+            errors.append("Valid WhatsApp number is required")
+        if order_mode == "Delivery":
+            if not delivery_address.strip():
+                errors.append("Delivery address is required when choosing Delivery mode")
+
+        if errors:
+            for err in errors:
+                st.error(err)
+        elif not twilio_client:
+            st.error("WhatsApp service unavailable right now")
+        else:
+            summary_lines = [
+                f"**Order #{datetime.datetime.now().strftime('%H%M%S')}**",
+                f"Customer: {name}",
+                f"WhatsApp: {norm_phone}",
+                f"─────",
+                f"{cups} × {tea_type}",
+                f"Masala: {'Yes' if masala else 'No'}",
+                f"Flavours: {', '.join(f for f in flavour if f != 'None') or 'None'}",
+                f"Sugar: {sugar} tsp/cup",
+                f"Milk: {milk}",
+                f"─────",
+                f"Mode: {order_mode}",
+            ]
+            if order_mode == "Delivery" and delivery_address.strip():
+                summary_lines.append(f"Address: {delivery_address.strip()}")
+            summary_lines += [f"Total: ₹{total:.1f} (incl. GST)"]
+
+            summary_text = "\n".join(summary_lines)
+
+            st.balloons()
+            st.markdown(
+                f'<div class="success-box"><h3>Order Placed Successfully! 🫖✨</h3>'
+                f'<pre>{summary_text}</pre>'
+                f'<p>Our team will confirm shortly via WhatsApp. Thank you for choosing ChaiWala!</p></div>',
+                unsafe_allow_html=True
+            )
+
+            # Owner message
+            owner_msg = f"""🔔 NEW CHAI ORDER #{datetime.datetime.now().strftime('%H%M%S')} 🔔
+
+{summary_text}
+
+Preparation Priority: {'High - Delivery' if order_mode == 'Delivery' else 'Medium - Dine-in/Pickup'}
+Payment: Cash / UPI on arrival
+
+Please prepare as soon as possible.
+Thank you! ☕🔥
+ChaiWala Team"""
+
+            send_whatsapp(OWNER_PHONE, owner_msg)
+
+            # Customer confirmation
+            cust_msg = f"""नमस्ते *{name}* ji! 🫖✨
+
+Your chai order is confirmed!
+
+{summary_text}
+
+{'We will deliver fresh to your address shortly. Stay tuned!' if order_mode == 'Delivery' else 'Please come to the stall for pickup / enjoy dine-in at your convenience.'}
+
+Brewing just for you... ☕❤️
+
+ChaiWala Team
+(Updates via WhatsApp)"""
+
+            send_whatsapp(phone_raw, cust_msg)
+
+            # QR code
+            qr_data = f"ChaiWala Order • {name} • {cups}×{tea_type} • ₹{total:.1f} • {order_mode}"
+            qr = qrcode.QRCode(version=1, box_size=5, border=4)
+            qr.add_data(qr_data)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="#E84C2E", back_color="white")
+            buf = io.BytesIO()
+            img.save(buf, "PNG")
+            buf.seek(0)
+            st.image(buf, caption="Order QR – show on arrival / delivery", width=160)
+
+with chat_col:
+    st.markdown('<div class="chat-header">🗣️ ChaiWala AI</div>', unsafe_allow_html=True)
+    st.caption("Ask menu, prices, custom ideas, chai facts...")
+
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = [{
+            "role": "system",
+            "content": """You are ChaiWala AI – warm, funny Delhi-style chai bhaiya.
+Use natural desi Hindi-English mix.
+Menu:
+- Milk Tea / Masala Tea: ₹15/cup
+- Green / Black Tea: ₹12/cup
+Add-ons: Ginger/Cardamom/Tulsi ₹4 each, extra sugar ₹2/tsp/cup, masala free
+Milk: Full Fat, Low Fat, Almond, None
+Payment: Cash / UPI on delivery
+Order types: Delivery or Dine-in/Pickup
+Keep replies short, tasty & helpful. Add chai facts/jokes sometimes."""
+        }]
+
+    chat_container = st.container(height=520, border=True)
+
+    with chat_container:
+        for msg in st.session_state.chat_history[1:]:
+            if msg["role"] != "system":
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+    if len(st.session_state.chat_history) > 24:
+        st.session_state.chat_history = [st.session_state.chat_history[0]] + st.session_state.chat_history[-22:]
+
+    user_input = st.chat_input("Ask anything about chai...", key="right_chat")
+
+    if user_input and groq_client:
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+        with chat_container:
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                full = ""
+                try:
+                    stream = groq_client.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=st.session_state.chat_history,
+                        temperature=0.78,
+                        max_tokens=320,
+                        stream=True
+                    )
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content is not None:
+                            full += chunk.choices[0].delta.content
+                            placeholder.markdown(full + "▌")
+                    placeholder.markdown(full)
+                except Exception as e:
+                    placeholder.markdown(f"Oops bhai! Thodi dikkat... ({str(e)})")
+
+        st.session_state.chat_history.append({"role": "assistant", "content": full})
+        st.rerun()
+
+    if st.button("Clear Chat", use_container_width=True):
+        st.session_state.chat_history = [st.session_state.chat_history[0]]
+        st.rerun()
+
+st.caption("ChaiWala • Twilio Sandbox • Delhi vibes only • v1.0 • 2026")
