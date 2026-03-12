@@ -1,0 +1,14 @@
+streamlit
+pandas
+numpy
+plotly
+streamlit
+ollama
+streamlit
+groq
+streamlit
+groq
+qrcode[pil]
+Pillow      
+twilio
+razorpay
